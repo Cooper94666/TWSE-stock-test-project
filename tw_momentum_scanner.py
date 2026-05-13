@@ -322,7 +322,7 @@ class TWSE_Scanner:
         except Exception:
             return None
 
-    def analyze_all_stocks(self):
+      def analyze_all_stocks(self):
         """分析所有股票"""
         self.all_stocks = self.get_all_twse_stocks()
         
@@ -342,7 +342,9 @@ class TWSE_Scanner:
         
         for idx, stock_id in enumerate(stock_ids):
             stock_name = self.all_stocks[stock_id]['name']
-            status_text.text(f"📈 分析進度: {idx+1}/{total_stocks} ({idx+1)/total_stocks*100:.1f}%) - {stock_id} {stock_name}")
+            # 修正這裡的括號錯誤
+            progress_percent = ((idx + 1) / total_stocks) * 100
+            status_text.text(f"📈 分析進度: {idx+1}/{total_stocks} ({progress_percent:.1f}%) - {stock_id} {stock_name}")
             
             df = self.get_stock_data(stock_id, period='60d')
             
@@ -372,7 +374,7 @@ class TWSE_Scanner:
                         result_container.info(f"📌 已找到 {len(results)} 檔符合條件的股票 (門檻: {self.min_turnover/1e8:.0f}億)")
             
             progress_bar.progress((idx + 1) / total_stocks)
-            time.sleep(0.25)  # 避免請求過快
+            time.sleep(0.25)
         
         status_text.empty()
         progress_bar.empty()
