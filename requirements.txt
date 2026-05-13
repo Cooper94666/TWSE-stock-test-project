@@ -3,3 +3,4 @@ pandas
 requests
 beautifulsoup4
 plotly
+lxml==4.9.3
