@@ -4,213 +4,306 @@ import requests
 import time
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-import re
+import yfinance as yf
+import io
 
 st.set_page_config(page_title="台股短期動能掃描器", layout="wide")
-st.title("🚀 台股短期高動能掃描器（TWSE上市）")
-st.markdown("**篩選條件**：20日均成交金額 > 100億 + 近期強勢")
+st.title("🚀 台股短期高動能掃描器 - 全市場掃描")
+st.markdown("**篩選條件**：20日均成交金額 > 100億 + 近期強勢 | 涵蓋所有上市股票")
 
 class TWSE_Scanner:
     def __init__(self):
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        self.min_turnover = 100_000_000_000
+        self.min_turnover = 100_000_000_000  # 100億台幣
+        self.all_stocks = {}  # 儲存所有股票
 
-    def get_stock_list(self):
-        """使用預先定義的熱門股票清單（避免爬蟲問題）"""
-        # 台灣50成分股 + 熱門中型股
-        stocks = {
-            # 半導體
-            '2330': '台積電', '2454': '聯發科', '2303': '聯電', '3443': '創意', '3035': '智原',
-            # 電子組裝
-            '2317': '鴻海', '2382': '廣達', '3231': '緯創', '2356': '英業達', '4938': '和碩',
-            # IC設計
-            '2379': '瑞昱', '3034': '聯詠', '2458': '義隆', '8016': '矽創', '5274': '信驊',
-            # 電子零組件
-            '2308': '台達電', '2327': '國巨', '2492': '華新科', '3044': '健鼎', '3037': '欣興',
-            # 光電
-            '3008': '大立光', '2409': '友達', '3481': '群創', '3698': '隆達',
-            # 通信網路
-            '2412': '中華電', '2345': '智邦', '5388': '中磊', '3596': '智易',
-            # 電腦周邊
-            '2357': '華碩', '2377': '微星', '2376': '技嘉', '2301': '光寶科',
-            # 塑膠
-            '1301': '台塑', '1303': '南亞', '1326': '台塑化',
-            # 鋼鐵
-            '2002': '中鋼', '2014': '中鴻',
-            # 金融（雖然排除但保留作為參考）
-            '2881': '富邦金', '2882': '國泰金', '2891': '中信金'
-        }
-        
-        df = pd.DataFrame([
-            {'stock_id': k, 'stock_name': v, 'industry': '電子業'}
-            for k, v in stocks.items()
-        ])
-        return df
-
-    def get_market_data(self, date):
-        """獲取單日全市場資料 - 純 requests，無需解析 HTML"""
+    def get_all_twse_stocks(self):
+        """從證交所抓取所有上市股票清單"""
         try:
-            url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json&date={date}"
-            resp = requests.get(url, headers=self.headers, timeout=10)
+            # 方法1: 從證交所API獲取
+            url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+            resp = requests.get(url, timeout=15)
             
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get('data') and len(data['data']) > 0:
-                    rows = []
-                    for row in data['data']:
-                        if len(row) >= 9:
-                            # 清理股票代碼（去除可能的前導零）
-                            stock_id = row[1].strip()
-                            if stock_id.isdigit() and len(stock_id) == 4:
-                                try:
-                                    rows.append({
-                                        'stock_id': stock_id,
-                                        'val': float(row[4].replace(',', '')) if row[4] else 0,
-                                        'close': float(row[8].replace(',', '')) if row[8] else 0,
-                                        'date': date
-                                    })
-                                except:
-                                    continue
-                    return pd.DataFrame(rows)
+                stocks = {}
+                for item in data:
+                    stock_id = item.get('公司代號', '')
+                    stock_name = item.get('公司名稱', '')
+                    industry = item.get('產業別', '')
+                    
+                    # 只保留4碼數字的股票，排除認購權證、ETF等
+                    if stock_id.isdigit() and len(stock_id) == 4:
+                        # 排除金融股（可選）
+                        # if not stock_id.startswith('28'):
+                        stocks[stock_id] = {
+                            'name': stock_name,
+                            'industry': industry
+                        }
+                
+                if stocks:
+                    st.success(f"✅ 成功從證交所取得 {len(stocks)} 檔上市股票")
+                    return stocks
+            
+            # 方法2: 備用方案 - 從證交所網頁抓取
+            url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+            resp = requests.get(url, timeout=15)
+            resp.encoding = 'big5'
+            
+            # 手動解析HTML表格
+            import re
+            stocks = {}
+            lines = resp.text.split('\n')
+            
+            for line in lines:
+                # 尋找股票代碼和名稱的模式
+                match = re.search(r'(\d{4})　([^<]+)', line)
+                if match:
+                    stock_id = match.group(1)
+                    stock_name = match.group(2).strip()
+                    # 排除權證、ETF、受益憑證等
+                    if not any(x in stock_name for x in ['權證', 'ETF', '受益憑證', '認購', '認售', '基金']):
+                        if not stock_id.startswith(('00', '01')):  # 排除債券等
+                            stocks[stock_id] = {
+                                'name': stock_name,
+                                'industry': '一般'
+                            }
+            
+            if stocks:
+                st.success(f"✅ 成功從證交所取得 {len(stocks)} 檔上市股票")
+                return stocks
+            
         except Exception as e:
-            # 靜默失敗
-            pass
-        return pd.DataFrame()
+            st.warning(f"從證交所抓取失敗: {str(e)[:100]}")
+        
+        # 方法3: 最後備案 - 使用預設清單但範圍更大
+        st.info("使用擴充股票清單（台灣中型100 + 其他熱門股）")
+        default_stocks = {
+            # 電子股
+            '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '2303': '聯電', 
+            '3443': '創意', '3035': '智原', '2379': '瑞昱', '3034': '聯詠',
+            '2458': '義隆', '8016': '矽創', '5274': '信驊', '5269': '祥碩',
+            '2382': '廣達', '3231': '緯創', '2356': '英業達', '4938': '和碩',
+            '2324': '仁寶', '2353': '宏碁', '2357': '華碩', '2376': '技嘉',
+            '2377': '微星', '2301': '光寶科', '2308': '台達電', '2327': '國巨',
+            '2492': '華新科', '3044': '健鼎', '3037': '欣興', '3189': '景碩',
+            '8046': '南電', '2313': '華通', '2368': '金像電', '2383': '台光電',
+            '4958': '臻鼎-KY', '3008': '大立光', '2409': '友達', '3481': '群創',
+            '2412': '中華電', '2345': '智邦', '5388': '中磊', '3596': '智易',
+            '6285': '啟碁', '4904': '遠傳', '3045': '台灣大',
+            # 傳產股
+            '1301': '台塑', '1303': '南亞', '1326': '台塑化', '2002': '中鋼',
+            '2014': '中鴻', '2027': '大成鋼', '1216': '統一', '1101': '台泥',
+            '1102': '亞泥', '1402': '遠東新', '1504': '東元', '1605': '華新',
+            '2207': '和泰車', '2201': '裕隆', '2105': '正新', '2106': '建大',
+            '1907': '永豐餘', '1476': '儒鴻', '1477': '聚陽',
+            # 金融股（如果需要）
+            '2881': '富邦金', '2882': '國泰金', '2891': '中信金', '2886': '兆豐金',
+            '2892': '第一金', '5880': '合庫金', '2884': '玉山金', '2885': '元大金',
+            '2880': '華南金', '2883': '開發金', '2887': '台新金', '2888': '新光金'
+        }
+        
+        stocks = {k: {'name': v, 'industry': '一般'} for k, v in default_stocks.items()}
+        st.warning(f"使用備用清單，共 {len(stocks)} 檔股票")
+        return stocks
 
-    def analyze(self):
-        """執行分析"""
-        st.info("📋 載入股票清單...")
-        stock_list = self.get_stock_list()
+    def get_stock_data(self, stock_id, period='60d'):
+        """從 Yahoo Finance 獲取股票資料"""
+        try:
+            ticker = f"{stock_id}.TW"
+            stock = yf.Ticker(ticker)
+            
+            # 獲取歷史資料
+            hist = stock.history(period=period)
+            
+            if hist.empty or len(hist) < 5:
+                return None
+            
+            # 計算成交金額
+            volume = hist['Volume']
+            close = hist['Close']
+            turnover = volume * close
+            
+            df = pd.DataFrame({
+                'date': hist.index,
+                'stock_id': stock_id,
+                'open': hist['Open'],
+                'high': hist['High'],
+                'low': hist['Low'],
+                'close': hist['Close'],
+                'volume': hist['Volume'],
+                'turnover': turnover
+            })
+            
+            return df
+        except Exception:
+            return None
+
+    def analyze_all_stocks(self):
+        """分析所有股票"""
+        # 先獲取所有股票清單
+        self.all_stocks = self.get_all_twse_stocks()
         
-        # 抓取近期的交易資料
-        end_date = datetime.now()
-        dates = []
-        for i in range(45):  # 抓45天，過濾後約30個交易日
-            d = end_date - timedelta(days=i)
-            if d.weekday() < 5:  # 星期一到五
-                dates.append(d.strftime('%Y%m%d'))
-            if len(dates) >= 30:  # 夠了
-                break
-        
-        all_data = []
-        progress = st.progress(0)
-        status = st.empty()
-        
-        for idx, date in enumerate(dates):
-            status.text(f"📊 抓取資料 {idx+1}/{len(dates)}: {date[:4]}/{date[4:6]}/{date[6:8]}")
-            df_day = self.get_market_data(date)
-            if not df_day.empty:
-                # 只保留我們關注的股票
-                df_day = df_day[df_day['stock_id'].isin(stock_list['stock_id'])]
-                if not df_day.empty:
-                    all_data.append(df_day)
-            progress.progress((idx + 1) / len(dates))
-            time.sleep(0.3)  # 避免請求過快
-        
-        status.empty()
-        
-        if not all_data:
-            st.error("❌ 無法獲取市場資料，請稍後再試")
+        if not self.all_stocks:
+            st.error("無法取得股票清單")
             return pd.DataFrame()
         
-        # 合併所有資料
-        market_df = pd.concat(all_data, ignore_index=True)
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        if market_df.empty:
+        stock_ids = list(self.all_stocks.keys())
+        total_stocks = len(stock_ids)
+        
+        st.info(f"📊 共 {total_stocks} 檔股票需要分析，預計需要 {total_stocks * 1.5 / 60:.1f} 分鐘")
+        
+        # 建立一個容器來顯示即時結果
+        result_container = st.empty()
+        
+        for idx, stock_id in enumerate(stock_ids):
+            stock_name = self.all_stocks[stock_id]['name']
+            status_text.text(f"📈 分析進度: {idx+1}/{total_stocks} - {stock_id} {stock_name}")
+            
+            # 獲取資料
+            df = self.get_stock_data(stock_id, period='60d')
+            
+            if df is not None and len(df) >= 20:
+                # 計算20日均成交金額
+                avg_turnover = df['turnover'].tail(20).mean()
+                
+                # 高流動性篩選
+                if avg_turnover >= self.min_turnover:
+                    # 計算漲跌幅
+                    closes = df['close'].values
+                    r5 = ((closes[-1] / closes[-min(5, len(closes))] - 1) * 100) if len(closes) >= 5 else 0
+                    r20 = ((closes[-1] / closes[-min(20, len(closes))] - 1) * 100) if len(closes) >= 20 else 0
+                    r60 = ((closes[-1] / closes[0] - 1) * 100) if len(closes) >= 60 else 0
+                    
+                    result = {
+                        'stock_id': stock_id,
+                        'stock_name': stock_name,
+                        'industry': self.all_stocks[stock_id].get('industry', '一般'),
+                        'close': closes[-1],
+                        'return_5d': r5,
+                        'return_20d': r20,
+                        'return_60d': r60,
+                        'avg_turnover_20d': avg_turnover,
+                        'momentum_score': r5 * 0.6 + r20 * 0.3
+                    }
+                    results.append(result)
+                    
+                    # 即時顯示找到的股票
+                    if len(results) % 5 == 0:
+                        temp_df = pd.DataFrame(results).sort_values('momentum_score', ascending=False)
+                        result_container.info(f"📌 已找到 {len(results)} 檔符合條件的股票")
+            
+            # 更新進度
+            progress_bar.progress((idx + 1) / total_stocks)
+            
+            # 避免請求過快
+            time.sleep(0.3)
+        
+        status_text.empty()
+        progress_bar.empty()
+        
+        if not results:
             return pd.DataFrame()
         
-        # 計算平均成交金額
-        avg_turnover = market_df.groupby('stock_id')['val'].mean().reset_index()
-        avg_turnover.columns = ['stock_id', 'avg_turnover_20d']
+        # 轉換為 DataFrame 並排序
+        result_df = pd.DataFrame(results)
+        result_df = result_df.sort_values('momentum_score', ascending=False)
         
-        # 獲取最新價格
-        latest_prices = market_df.sort_values('date').groupby('stock_id').last().reset_index()
-        latest_prices = latest_prices[['stock_id', 'close']]
+        # 計算停損價
+        result_df['stop_loss'] = (result_df['close'] * 0.92).round(2)
         
-        # 合併結果
-        result = stock_list.merge(avg_turnover, on='stock_id', how='inner')
-        result = result.merge(latest_prices, on='stock_id', how='inner')
-        
-        # 計算各股票在不同日期的價格（用於漲跌幅計算）
-        def calc_returns(stock_data):
-            if len(stock_data) < 2:
-                return {'return_5d': 0, 'return_20d': 0}
-            
-            stock_data = stock_data.sort_values('date')
-            closes = stock_data['close'].values
-            
-            # 5日漲幅（約一週）
-            r5 = ((closes[-1] / closes[-min(5, len(closes))] - 1) * 100) if len(closes) >= 5 else 0
-            # 20日漲幅（約一個月）
-            r20 = ((closes[-1] / closes[0] - 1) * 100) if len(closes) >= 20 else 0
-            
-            return {'return_5d': r5, 'return_20d': r20}
-        
-        # 計算每檔股票的漲跌幅
-        returns_list = []
-        for stock_id in result['stock_id']:
-            stock_data = market_df[market_df['stock_id'] == stock_id]
-            returns = calc_returns(stock_data)
-            returns['stock_id'] = stock_id
-            returns_list.append(returns)
-        
-        returns_df = pd.DataFrame(returns_list)
-        result = result.merge(returns_df, on='stock_id', how='left')
-        
-        # 篩選條件：日均成交金額 >= 100億
-        result = result[result['avg_turnover_20d'] >= self.min_turnover].copy()
-        
-        if result.empty:
-            st.warning(f"⚠️ 無股票達到 {self.min_turnover/1e8:.0f} 億的日均成交門檻")
-            return pd.DataFrame()
-        
-        # 計算動能分數並排序
-        result['momentum_score'] = result['return_5d'] * 0.6 + result['return_20d'] * 0.3
-        result = result.sort_values('momentum_score', ascending=False)
-        
-        # 計算停損價（-8%）
-        result['stop_loss'] = (result['close'] * 0.92).round(2)
-        
-        return result.head(20)  # 只回傳前20名
+        return result_df
 
 # ====================== 主介面 ======================
 st.markdown("---")
 
-if st.button("🔍 開始掃描高動能股票", type="primary", use_container_width=True):
-    with st.spinner("⏳ 正在抓取證交所資料，請耐心等待（約1-2分鐘）..."):
-        scanner = TWSE_Scanner()
-        df = scanner.analyze()
+# 設定篩選條件
+col1, col2 = st.columns(2)
+with col1:
+    min_turnover_billion = st.number_input(
+        "最低日均成交金額（億台幣）",
+        min_value=10,
+        max_value=500,
+        value=100,
+        step=10,
+        help="篩選條件：20日均成交金額需大於此值"
+    )
+with col2:
+    top_n = st.number_input(
+        "顯示前幾名",
+        min_value=10,
+        max_value=100,
+        value=30,
+        step=10,
+        help="顯示動能分數最高的前N名股票"
+    )
+
+if st.button("🔍 開始掃描全市場高動能股票", type="primary", use_container_width=True):
+    scanner = TWSE_Scanner()
+    scanner.min_turnover = min_turnover_billion * 100_000_000
+    
+    with st.spinner("⏳ 正在分析全市場股票，請耐心等待（約5-10分鐘）..."):
+        df = scanner.analyze_all_stocks()
         
         if not df.empty:
-            st.success(f"✅ 找到 {len(df)} 檔符合條件的股票")
+            st.success(f"✅ 找到 {len(df)} 檔符合高流動性條件的股票")
             
             # 準備顯示資料
-            display_df = df[['stock_id', 'stock_name', 'close', 'return_5d', 'return_20d', 'avg_turnover_20d', 'stop_loss']].copy()
+            display_df = df.head(top_n).copy()
             display_df['return_5d'] = display_df['return_5d'].round(1)
             display_df['return_20d'] = display_df['return_20d'].round(1)
-            display_df['avg_turnover_20d'] = (display_df['avg_turnover_20d'] / 1e8).round(1).astype(str) + "億"
+            display_df['return_60d'] = display_df['return_60d'].round(1)
+            display_df['20日均成交'] = (display_df['avg_turnover_20d'] / 1e8).round(1).astype(str) + "億"
+            display_df['收盤價'] = display_df['close'].round(2)
             
-            display_df.columns = ['代碼', '名稱', '收盤價', '5日漲幅(%)', '20日漲幅(%)', '20日均成交金額', '建議停損價']
+            display_cols = ['stock_id', 'stock_name', 'industry', '收盤價', 'return_5d', 
+                           'return_20d', 'return_60d', '20日均成交', 'momentum_score', 'stop_loss']
+            display_df = display_df[display_cols]
+            
+            display_df.columns = ['代碼', '名稱', '產業', '收盤價', '5日漲幅%', '20日漲幅%', 
+                                '60日漲幅%', '20日均成交', '動能分數', '建議停損價']
+            
+            # 顯示統計資訊
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("符合條件股票", len(df))
+            with col2:
+                st.metric("平均5日漲幅", f"{display_df['5日漲幅%'].mean():.1f}%")
+            with col3:
+                st.metric("平均20日漲幅", f"{display_df['20日漲幅%'].mean():.1f}%")
+            with col4:
+                st.metric("平均動能分數", f"{display_df['動能分數'].mean():.1f}")
             
             # 顯示表格
-            st.dataframe(display_df, use_container_width=True, height=400)
+            st.dataframe(display_df, use_container_width=True, height=500)
             
-            # 顯示前5名詳細資訊
-            st.subheader("🏆 前5強動能股")
-            for idx, row in display_df.head(5).iterrows():
+            # 產業分布圖
+            st.subheader("📊 產業分布")
+            industry_counts = display_df['產業'].value_counts().head(10)
+            st.bar_chart(industry_counts)
+            
+            # 顯示前10名詳細資訊
+            st.subheader("🏆 前10強動能股")
+            for idx, row in display_df.head(10).iterrows():
                 with st.container():
-                    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
+                    col1, col2, col3, col4, col5, col6 = st.columns([1, 1.5, 1.2, 1.2, 1.5, 1.5])
                     with col1:
-                        st.metric("代碼", row['代碼'])
+                        st.metric("排名", idx+1)
                     with col2:
-                        st.metric("名稱", row['名稱'])
+                        st.metric("代碼/名稱", f"{row['代碼']}\n{row['名稱']}")
                     with col3:
                         st.metric("股價", f"{row['收盤價']:.1f}")
                     with col4:
-                        st.metric("5日漲幅", f"{row['5日漲幅(%)']}%", 
-                                 delta=f"{row['5日漲幅(%)']}%" if row['5日漲幅(%)'] > 0 else None)
+                        delta_color = "normal" if row['5日漲幅%'] >= 0 else "inverse"
+                        st.metric("5日漲幅", f"{row['5日漲幅%']:.1f}%", 
+                                 delta=f"{row['5日漲幅%']:.1f}%" if row['5日漲幅%'] >= 0 else f"{row['5日漲幅%']:.1f}%")
+                    with col5:
+                        st.metric("20日漲幅", f"{row['20日漲幅%']:.1f}%")
+                    with col6:
+                        st.metric("20日均成交", row['20日均成交'])
                     st.divider()
             
             # 下載功能
@@ -218,28 +311,37 @@ if st.button("🔍 開始掃描高動能股票", type="primary", use_container_w
             st.download_button(
                 label="📥 下載完整報告 (CSV)",
                 data=csv,
-                file_name=f"momentum_stocks_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"all_stocks_momentum_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
             )
         else:
-            st.error("❌ 目前無符合條件的股票，可能是市場資料不足或門檻過高")
+            st.warning(f"⚠️ 無股票達到 {min_turnover_billion} 億的日均成交門檻，請降低門檻試試")
 
-# 說明資訊
-with st.expander("ℹ️ 使用說明"):
+# 側邊欄說明
+with st.sidebar:
+    st.header("📌 使用說明")
     st.markdown("""
     **篩選邏輯**：
-    - 20日均成交金額 ≥ 100億台幣
-    - 綜合評分 = 5日漲幅×0.6 + 20日漲幅×0.3
-    - 建議停損價 = 目前股價 × 0.92 (下跌8%)
+    - 20日均成交金額 ≥ 設定門檻
+    - 動能分數 = 5日漲幅×0.6 + 20日漲幅×0.3
+    - 建議停損價 = 股價 × 0.92
     
-    **資料來源**：
-    - 台灣證券交易所 (TWSE) 公開API
-    - 僅供參考，不構成投資建議
+    **資料範圍**：
+    - 涵蓋所有上市股票（約900-1000檔）
+    - 資料來源：Yahoo Finance
+    - 自動排除權證、ETF等
+    
+    **分析時間**：
+    - 約需5-10分鐘
+    - 進度條會顯示即時進度
+    - 可即時看到找到的股票
     
     **注意事項**：
-    - 資料抓取約需1-2分鐘
-    - 包含台灣50成分股及熱門中型股
-    - 排除金融股以專注電子傳產
+    - 僅供參考，非投資建議
+    - 高動能伴隨高風險
+    - 建議搭配基本面分析
     """)
+    
+    st.warning("⚠️ 免責聲明：本工具僅供參考，所有數據來自公開資訊，投資決策請自行判斷")
 
-st.caption("⚠️ 免責聲明：本工具僅供參考，所有數據來自公開資訊，投資決策請自行判斷")
+st.caption(f"最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 資料來源：TWSE + Yahoo Finance")
