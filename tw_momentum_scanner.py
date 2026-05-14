@@ -25,64 +25,38 @@ st.markdown("""
 # =========================
 def get_stock_list():
 
-    import requests
-    import urllib3
-    urllib3.disable_warnings()
+    import pandas as pd
 
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+    url = "https://quality.data.gov.tw/dq_download_csv.php?nid=18419&md5_url="
 
-    stocks = {}
-
-    # =========================
-    # TWSE API（上市）
-    # =========================
     try:
 
-        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        df = pd.read_csv(url)
 
-        r = requests.get(url_twse, headers=headers, timeout=10)
+        stocks = {}
 
-        data = r.json()
+        for _, row in df.iterrows():
 
-        for item in data:
+            try:
 
-            code = item.get("Code")
+                code = str(row.iloc[0])
 
-            name = item.get("Name")
+                name = str(row.iloc[1])
 
-            if code and code.isdigit():
-                stocks[code] = name
+                if code.isdigit() and len(code) == 4:
 
-    except Exception as e:
-        st.warning(f"TWSE 失敗：{e}")
+                    stocks[code] = name
 
-    # =========================
-    # OTC API（上櫃）
-    # =========================
-    try:
+            except:
+                continue
 
-        url_otc = "https://www.tpex.org.tw/openapi/v1/market/regular_stock/all"
-
-        r = requests.get(url_otc, headers=headers, timeout=10)
-
-        data = r.json()
-
-        for item in data:
-
-            code = item.get("code")
-
-            name = item.get("name")
-
-            if code and code.isdigit():
-                stocks[code] = name
+        return stocks
 
     except Exception as e:
-        st.warning(f"OTC 失敗：{e}")
 
-    return stocks
+        st.error(f"❌ 股票清單載入失敗：{e}")
 
+        return {}
 
 # =========================
 # 模擬動能（穩定版）
