@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import requests
 import urllib3
@@ -10,46 +9,48 @@ from io import StringIO
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# =========================
-# SSL 警告關閉
-# =========================
+# =====================================
+# 關閉 SSL Warning
+# =====================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# =========================
+# =====================================
 # Streamlit 設定
-# =========================
+# =====================================
 st.set_page_config(
     page_title="台股高動能掃描器",
     layout="wide"
 )
 
-st.title("🚀 台股高動能掃描器（1800+ 全市場版）")
+st.title("🚀 台股高動能掃描器（全市場版）")
 
 st.markdown("""
-### 功能特色
+### 功能
 - ✅ 自動抓取上市 / 上櫃 / ETF
 - ✅ 超過 1800 檔股票
 - ✅ 多線程高速掃描
-- ✅ RSI + 均線 + 動能分析
+- ✅ RSI + 動能分析
 - ✅ 成交額過濾
 - ✅ CSV下載
-- ✅ Streamlit 可直接執行
 """)
 
-# =========================
+# =====================================
 # 掃描器類別
-# =========================
+# =====================================
 class TWStockScanner:
 
     def __init__(self):
 
-        self.min_turnover = 100_000_000_000
+        # 預設 5 億
+        self.min_turnover = 5 * 100000000
+
         self.max_workers = 40
+
         self.stock_list = {}
 
-    # =========================
+    # =====================================
     # 抓取股票清單
-    # =========================
+    # =====================================
     def get_all_stocks(self):
 
         stocks = {}
@@ -83,9 +84,9 @@ class TWStockScanner:
 
                 return df
 
-            # =====================
+            # =============================
             # 上市
-            # =====================
+            # =============================
             df_twse = fetch_table(
                 "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
             )
@@ -120,9 +121,9 @@ class TWStockScanner:
                 except:
                     continue
 
-            # =====================
+            # =============================
             # 上櫃
-            # =====================
+            # =============================
             df_otc = fetch_table(
                 "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
             )
@@ -157,9 +158,9 @@ class TWStockScanner:
                 except:
                     continue
 
-            # =====================
+            # =============================
             # ETF
-            # =====================
+            # =============================
             df_etf = fetch_table(
                 "https://isin.twse.com.tw/isin/C_public.jsp?strMode=7"
             )
@@ -202,9 +203,9 @@ class TWStockScanner:
 
             return {}
 
-    # =========================
+    # =====================================
     # 分析單一股票
-    # =========================
+    # =====================================
     def analyze_stock(self, stock_id, market):
 
         try:
@@ -225,7 +226,8 @@ class TWStockScanner:
 
             hist = hist.dropna()
 
-            if len(hist) < 20:
+            # 最少 10 天資料
+            if len(hist) < 10:
                 return None
 
             close = hist["Close"]
@@ -234,26 +236,30 @@ class TWStockScanner:
 
             turnover = close * volume
 
-            avg_turnover = turnover.tail(20).mean()
+            avg_turnover = turnover.mean()
 
             # 成交額過濾
             if avg_turnover < self.min_turnover:
                 return None
 
-            # =====================
-            # 漲幅
-            # =====================
+            # =============================
+            # 漲幅計算
+            # =============================
+            r5_days = min(5, len(close)-1)
+
+            r20_days = min(20, len(close)-1)
+
             r5 = (
-                (close.iloc[-1] / close.iloc[-5]) - 1
+                (close.iloc[-1] / close.iloc[-r5_days]) - 1
             ) * 100
 
             r20 = (
-                (close.iloc[-1] / close.iloc[0]) - 1
+                (close.iloc[-1] / close.iloc[-r20_days]) - 1
             ) * 100
 
-            # =====================
+            # =============================
             # RSI
-            # =====================
+            # =============================
             delta = close.diff()
 
             gain = delta.where(delta > 0, 0)
@@ -270,16 +276,19 @@ class TWStockScanner:
 
             latest_rsi = rsi.iloc[-1]
 
-            # =====================
+            if pd.isna(latest_rsi):
+                latest_rsi = 50
+
+            # =============================
             # 均線
-            # =====================
-            ma5 = close.tail(5).mean()
+            # =============================
+            ma5 = close.tail(min(5, len(close))).mean()
 
-            ma20 = close.tail(20).mean()
+            ma20 = close.mean()
 
-            # =====================
+            # =============================
             # 動能分數
-            # =====================
+            # =============================
             momentum_score = (
                 r5 * 0.5 +
                 r20 * 0.3 +
@@ -323,12 +332,13 @@ class TWStockScanner:
                 round(close.iloc[-1] * 0.92, 2)
             }
 
-        except:
+        except Exception as e:
+
             return None
 
-    # =========================
-    # 掃描市場
-    # =========================
+    # =====================================
+    # 全市場掃描
+    # =====================================
     def scan_market(self):
 
         self.stock_list = self.get_all_stocks()
@@ -372,7 +382,8 @@ class TWStockScanner:
                 progress_bar.progress(progress)
 
                 status.text(
-                    f"📈 掃描進度：{completed}/{total} "
+                    f"📈 掃描進度："
+                    f"{completed}/{total} "
                     f"({progress*100:.1f}%)"
                 )
 
@@ -397,17 +408,17 @@ class TWStockScanner:
 
         return df
 
-# =========================
+# =====================================
 # Sidebar
-# =========================
+# =====================================
 st.sidebar.header("⚙️ 掃描設定")
 
 min_turnover = st.sidebar.number_input(
-    "最低20日均成交額（億）",
-    min_value=10,
+    "最低平均成交額（億）",
+    min_value=1,
     max_value=500,
-    value=50,
-    step=10
+    value=5,
+    step=1
 )
 
 top_n = st.sidebar.number_input(
@@ -438,9 +449,9 @@ st.sidebar.info("""
 非投資建議
 """)
 
-# =========================
+# =====================================
 # 開始掃描
-# =========================
+# =====================================
 if st.button(
     "🚀 開始掃描全市場",
     type="primary",
@@ -463,9 +474,6 @@ if st.button(
 
         elapsed = time.time() - start_time
 
-    # =====================
-    # 顯示結果
-    # =====================
     if not df.empty:
 
         st.success(
@@ -476,9 +484,9 @@ if st.button(
 
         st.balloons()
 
-        # =====================
-        # 統計資訊
-        # =====================
+        # =====================================
+        # 統計
+        # =====================================
         c1, c2, c3, c4 = st.columns(4)
 
         with c1:
@@ -505,9 +513,9 @@ if st.button(
                 f"{df['momentum_score'].max():.2f}"
             )
 
-        # =====================
-        # 顯示表格
-        # =====================
+        # =====================================
+        # 表格
+        # =====================================
         display_df = df.head(top_n).copy()
 
         display_df = display_df[
@@ -533,7 +541,7 @@ if st.button(
             "5日漲幅%",
             "20日漲幅%",
             "RSI",
-            "20日均成交(億)",
+            "平均成交額(億)",
             "動能分數",
             "停損價"
         ]
@@ -544,9 +552,9 @@ if st.button(
             height=700
         )
 
-        # =====================
+        # =====================================
         # CSV下載
-        # =====================
+        # =====================================
         csv = display_df.to_csv(
             index=False
         ).encode("utf-8-sig")
@@ -564,9 +572,9 @@ if st.button(
             "⚠️ 沒有找到符合條件股票"
         )
 
-# =========================
+# =====================================
 # Footer
-# =========================
+# =====================================
 st.caption(
     f"""
 📅 更新時間：
