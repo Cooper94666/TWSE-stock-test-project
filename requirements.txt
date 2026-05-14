@@ -6,3 +6,4 @@ plotly>=5.24.0
 yfinance>=0.2.40
 beautifulsoup4>=4.12.0
 lxml
+html5lib
