@@ -3,32 +3,39 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import urllib3
 import time
 
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =========================
-# Streamlit 頁面設定
+# SSL 修復
+# =========================
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# =========================
+# Streamlit 設定
 # =========================
 st.set_page_config(
-    page_title="台股短期高動能掃描器",
+    page_title="台股高動能掃描器",
     layout="wide"
 )
 
-st.title("🚀 台股短期高動能掃描器（全市場版）")
+st.title("🚀 台股高動能掃描器（全市場版）")
+
 st.markdown("""
 ### 功能特色
-✅ 自動抓取上市 / 上櫃 / ETF  
-✅ 超過 1800 檔股票  
-✅ 多線程高速掃描  
-✅ 20日均成交額過濾  
-✅ 短期動能排行  
-✅ 自動停損價計算  
+- ✅ 自動抓取上市 / 上櫃 / ETF
+- ✅ 超過 1800 檔股票
+- ✅ 多線程高速掃描
+- ✅ RSI + 動能分析
+- ✅ 成交量過濾
+- ✅ CSV下載
 """)
 
 # =========================
-# 掃描器類別
+# Scanner Class
 # =========================
 class TWStockScanner:
 
@@ -39,7 +46,7 @@ class TWStockScanner:
         self.stock_list = {}
 
     # =========================
-    # 取得完整股票清單
+    # 取得股票清單
     # =========================
     def get_all_stocks(self):
 
@@ -47,20 +54,42 @@ class TWStockScanner:
 
         try:
 
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
+
+            def fetch_table(url):
+
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    verify=False,
+                    timeout=20
+                )
+
+                response.encoding = "utf-8"
+
+                tables = pd.read_html(response.text)
+
+                df = tables[0]
+
+                df.columns = df.iloc[0]
+
+                df = df[1:]
+
+                return df
+
             # =====================
             # 上市
             # =====================
-            url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-
-            tables = pd.read_html(url_twse)
-
-            df_twse = tables[0]
-            df_twse.columns = df_twse.iloc[0]
-            df_twse = df_twse[1:]
+            df_twse = fetch_table(
+                "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+            )
 
             for _, row in df_twse.iterrows():
 
                 try:
+
                     code_name = str(row["有價證券代號及名稱"])
 
                     parts = code_name.split()
@@ -84,20 +113,15 @@ class TWStockScanner:
             # =====================
             # 上櫃
             # =====================
-            url_otc = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
-
-            tables = pd.read_html(url_otc)
-
-            df_otc = tables[0]
-            df_otc.columns = df_otc.iloc[0]
-            df_otc = df_otc[1:]
+            df_otc = fetch_table(
+                "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
+            )
 
             for _, row in df_otc.iterrows():
 
                 try:
-                    code_name = str(row["有價證券代號及名稱"]
 
-                    )
+                    code_name = str(row["有價證券代號及名稱"])
 
                     parts = code_name.split()
 
@@ -120,17 +144,14 @@ class TWStockScanner:
             # =====================
             # ETF
             # =====================
-            url_etf = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=7"
-
-            tables = pd.read_html(url_etf)
-
-            df_etf = tables[0]
-            df_etf.columns = df_etf.iloc[0]
-            df_etf = df_etf[1:]
+            df_etf = fetch_table(
+                "https://isin.twse.com.tw/isin/C_public.jsp?strMode=7"
+            )
 
             for _, row in df_etf.iterrows():
 
                 try:
+
                     code_name = str(row["有價證券代號及名稱"])
 
                     parts = code_name.split()
@@ -160,9 +181,9 @@ class TWStockScanner:
             return {}
 
     # =========================
-    # 取得單一股票資料
+    # 單一股票分析
     # =========================
-    def get_stock_data(self, stock_id, market):
+    def analyze_stock(self, stock_id, market):
 
         try:
 
@@ -172,9 +193,12 @@ class TWStockScanner:
 
             stock = yf.Ticker(ticker)
 
-            hist = stock.history(period="90d")
+            hist = stock.history(
+                period="3mo",
+                auto_adjust=True
+            )
 
-            if hist.empty or len(hist) < 25:
+            if hist.empty:
                 return None
 
             hist = hist.dropna()
@@ -187,16 +211,27 @@ class TWStockScanner:
 
             turnover = close * volume
 
-            avg_turnover_20d = turnover.tail(20).mean()
+            avg_turnover = turnover.tail(20).mean()
 
-            # 不符合成交額門檻
-            if avg_turnover_20d < self.min_turnover:
+            # 成交額過濾
+            if avg_turnover < self.min_turnover:
                 return None
 
-            # 漲幅計算
-            r5 = (close.iloc[-1] / close.iloc[-5] - 1) * 100
-            r20 = (close.iloc[-1] / close.iloc[-20] - 1) * 100
-            r60 = (close.iloc[-1] / close.iloc[-60] - 1) * 100 if len(close) >= 60 else 0
+            # 漲幅
+            r5 = (
+                (close.iloc[-1] / close.iloc[-5]) - 1
+            ) * 100
+
+            r20 = (
+                (close.iloc[-1] / close.iloc[-20]) - 1
+            ) * 100
+
+            if len(close) >= 60:
+                r60 = (
+                    (close.iloc[-1] / close.iloc[-60]) - 1
+                ) * 100
+            else:
+                r60 = 0
 
             # 均線
             ma5 = close.tail(5).mean()
@@ -221,7 +256,7 @@ class TWStockScanner:
             momentum_score = (
                 r5 * 0.5 +
                 r20 * 0.3 +
-                (latest_rsi / 100) * 20
+                latest_rsi * 0.2
             )
 
             return {
@@ -232,7 +267,7 @@ class TWStockScanner:
                 "return_5d": round(r5, 2),
                 "return_20d": round(r20, 2),
                 "return_60d": round(r60, 2),
-                "avg_turnover_20d": avg_turnover_20d,
+                "avg_turnover": round(avg_turnover / 100000000, 2),
                 "ma5": round(ma5, 2),
                 "ma20": round(ma20, 2),
                 "rsi": round(latest_rsi, 2),
@@ -268,11 +303,13 @@ class TWStockScanner:
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
 
             futures = {
+
                 executor.submit(
-                    self.get_stock_data,
+                    self.analyze_stock,
                     stock_id,
                     self.stock_list[stock_id]["market"]
                 ): stock_id
+
                 for stock_id in stock_ids
             }
 
@@ -308,7 +345,6 @@ class TWStockScanner:
 
         return df
 
-
 # =========================
 # Sidebar
 # =========================
@@ -340,15 +376,13 @@ worker_count = st.sidebar.slider(
 st.sidebar.markdown("---")
 
 st.sidebar.info("""
-### 📌 動能分數計算
-
-動能分數 =
+### 動能分數
 - 5日漲幅 × 0.5
 - 20日漲幅 × 0.3
-- RSI強度 × 0.2
+- RSI × 0.2
 
-### ⚠️ 注意
-僅供研究參考  
+### 注意
+僅供研究參考
 非投資建議
 """)
 
@@ -363,66 +397,59 @@ if st.button(
 
     scanner = TWStockScanner()
 
-    scanner.min_turnover = min_turnover * 100_000_000
+    scanner.min_turnover = min_turnover * 100000000
 
     scanner.max_workers = worker_count
 
     with st.spinner("⏳ 正在高速掃描市場..."):
 
-        start_time = time.time()
+        start = time.time()
 
         df = scanner.scan_market()
 
-        elapsed = time.time() - start_time
+        elapsed = time.time() - start
 
-    # =========================
-    # 顯示結果
-    # =========================
     if not df.empty:
 
-        st.balloons()
-
         st.success(
-            f"✅ 掃描完成！找到 {len(df)} 檔符合條件股票 "
+            f"✅ 掃描完成！找到 {len(df)} 檔股票 "
             f"（耗時 {elapsed:.1f} 秒）"
         )
+
+        st.balloons()
 
         # =====================
         # 統計
         # =====================
-        col1, col2, col3, col4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns(4)
 
-        with col1:
-            st.metric("符合條件", f"{len(df)} 檔")
+        with c1:
+            st.metric("符合條件", len(df))
 
-        with col2:
+        with c2:
             st.metric(
                 "平均5日漲幅",
                 f"{df['return_5d'].mean():.2f}%"
             )
 
-        with col3:
+        with c3:
             st.metric(
                 "平均20日漲幅",
                 f"{df['return_20d'].mean():.2f}%"
             )
 
-        with col4:
+        with c4:
             st.metric(
-                "最高動能分數",
+                "最高動能",
                 f"{df['momentum_score'].max():.2f}"
             )
 
         # =====================
-        # 顯示表格
+        # 表格
         # =====================
         display_df = df.head(top_n).copy()
 
-        display_df["20日均成交額(億)"] = (
-            display_df["avg_turnover_20d"] / 100_000_000
-        ).round(2)
-
-        final_df = display_df[
+        display_df = display_df[
             [
                 "stock_id",
                 "stock_name",
@@ -432,13 +459,13 @@ if st.button(
                 "return_20d",
                 "return_60d",
                 "rsi",
-                "20日均成交額(億)",
+                "avg_turnover",
                 "momentum_score",
                 "stop_loss"
             ]
         ]
 
-        final_df.columns = [
+        display_df.columns = [
             "代碼",
             "名稱",
             "市場",
@@ -453,69 +480,38 @@ if st.button(
         ]
 
         st.dataframe(
-            final_df,
+            display_df,
             use_container_width=True,
             height=700
         )
 
         # =====================
-        # 下載 CSV
+        # CSV下載
         # =====================
-        csv = final_df.to_csv(
+        csv = display_df.to_csv(
             index=False
         ).encode("utf-8-sig")
 
         st.download_button(
-            label="📥 下載 CSV",
+            label="📥 下載CSV",
             data=csv,
-            file_name=f"tw_momentum_scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            file_name=f"momentum_scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv"
         )
 
-        # =====================
-        # TOP 10
-        # =====================
-        st.subheader("🏆 TOP 10 強勢股")
-
-        top10 = final_df.head(10)
-
-        for idx, row in top10.iterrows():
-
-            with st.container():
-
-                c1, c2, c3, c4, c5, c6 = st.columns(6)
-
-                with c1:
-                    st.metric("排名", idx + 1)
-
-                with c2:
-                    st.metric("代碼", row["代碼"])
-
-                with c3:
-                    st.metric("名稱", row["名稱"])
-
-                with c4:
-                    st.metric("股價", row["收盤價"])
-
-                with c5:
-                    st.metric("5日漲幅", f"{row['5日漲幅%']}%")
-
-                with c6:
-                    st.metric("動能", row["動能分數"])
-
-                st.divider()
-
     else:
 
-        st.warning("⚠️ 沒有找到符合條件股票")
+        st.warning("⚠️ 找不到符合條件股票")
 
 # =========================
 # Footer
 # =========================
 st.caption(
     f"""
-📅 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-｜資料來源：Yahoo Finance
-｜僅供研究參考，非投資建議
+📅 更新時間：
+{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+資料來源：Yahoo Finance
+僅供研究用途，非投資建議
 """
 )
