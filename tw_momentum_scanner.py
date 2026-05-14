@@ -1,351 +1,521 @@
 import streamlit as st
 import pandas as pd
-import time
-from datetime import datetime, timedelta
-import plotly.graph_objects as go
+import numpy as np
 import yfinance as yf
+import requests
+import time
 
-st.set_page_config(page_title="台股短期動能掃描器", layout="wide")
-st.title("🚀 台股短期高動能掃描器 - 全市場掃描")
-st.markdown("**篩選條件**：20日均成交金額 > 100億 + 近期強勢 | 涵蓋所有上市股票")
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-class TWSE_Scanner:
+# =========================
+# Streamlit 頁面設定
+# =========================
+st.set_page_config(
+    page_title="台股短期高動能掃描器",
+    layout="wide"
+)
+
+st.title("🚀 台股短期高動能掃描器（全市場版）")
+st.markdown("""
+### 功能特色
+✅ 自動抓取上市 / 上櫃 / ETF  
+✅ 超過 1800 檔股票  
+✅ 多線程高速掃描  
+✅ 20日均成交額過濾  
+✅ 短期動能排行  
+✅ 自動停損價計算  
+""")
+
+# =========================
+# 掃描器類別
+# =========================
+class TWStockScanner:
+
     def __init__(self):
+
         self.min_turnover = 100_000_000_000
-        self.all_stocks = {}
+        self.max_workers = 20
+        self.stock_list = {}
 
-    def get_all_twse_stocks(self):
-        """完整上市股票清單"""
-        all_stocks = {
-            # 水泥工業
-            '1101': '台泥', '1102': '亞泥', '1103': '嘉泥', '1104': '環泥', '1108': '幸福', '1109': '信大', '1110': '東泥',
-            # 食品工業
-            '1201': '味全', '1203': '味王', '1210': '大成', '1213': '大飲', '1215': '卜蜂', '1216': '統一', '1217': '愛之味',
-            '1218': '泰山', '1219': '福壽', '1220': '台榮', '1225': '福懋油', '1227': '佳格', '1229': '聯華', '1231': '聯華食',
-            '1232': '大統益', '1233': '天仁', '1234': '黑松', '1235': '興泰', '1236': '宏亞', '1256': '鮮活果汁-KY',
-            # 塑膠工業
-            '1301': '台塑', '1303': '南亞', '1304': '台聚', '1305': '華夏', '1307': '三芳', '1308': '亞聚', '1309': '台達化',
-            '1310': '台苯', '1312': '國喬', '1313': '聯成', '1314': '中石化', '1315': '達新', '1316': '上曜', '1319': '東陽',
-            '1321': '大洋', '1323': '永裕', '1324': '地球', '1325': '恆大', '1326': '台化', '1336': '台翰', '1337': '再生-KY',
-            '1338': '廣華-KY', '1339': '昭輝', '1340': '勝悅-KY', '1341': '富林-KY', '1342': '八貫',
-            # 紡織纖維
-            '1402': '遠東新', '1409': '新纖', '1410': '南染', '1413': '宏洲', '1414': '東和', '1416': '廣豐', '1417': '嘉裕',
-            '1418': '東華', '1419': '新紡', '1423': '利華', '1432': '大魯閣', '1434': '福懋', '1435': '中福', '1436': '華友聯',
-            '1437': '勤益控', '1438': '三地開發', '1439': '雋揚', '1440': '南紡', '1441': '大東', '1442': '名軒', '1443': '立益物流',
-            '1444': '力麗', '1445': '大宇', '1446': '宏和', '1447': '力鵬', '1449': '佳和', '1451': '年興', '1452': '宏益',
-            '1453': '大將', '1454': '台富', '1455': '集盛', '1456': '怡華', '1457': '宜進', '1459': '聯發', '1460': '宏遠',
-            '1463': '強盛', '1464': '得力', '1465': '偉全', '1466': '聚隆', '1467': '南緯', '1468': '昶和', '1470': '大統新創',
-            '1471': '首利', '1472': '三洋實業', '1473': '台南', '1474': '弘裕', '1475': '業旺', '1476': '儒鴻', '1477': '聚陽',
-            # 電機機械
-            '1503': '士電', '1504': '東元', '1506': '正道', '1507': '永大', '1512': '瑞利', '1513': '中興電', '1514': '亞力',
-            '1515': '力山', '1516': '川飛', '1517': '利奇', '1519': '華城', '1521': '大億', '1522': '堤維西', '1524': '耿鼎',
-            '1525': '江申', '1526': '日馳', '1527': '鑽全', '1528': '恩德', '1529': '樂士', '1530': '亞崴', '1531': '高林股',
-            '1532': '勤美', '1533': '車王電', '1535': '中宇', '1536': '和大', '1537': '廣隆', '1538': '正峰', '1539': '巨庭',
-            '1540': '喬福', '1541': '錩泰', '1558': '伸興', '1560': '中砂', '1568': '倉佑', '1582': '信錦', '1583': '程泰',
-            '1587': '吉茂', '1590': '亞德客-KY', '1597': '直得', '1598': '岱宇',
-            # 電器電纜
-            '1603': '華電', '1604': '聲寶', '1605': '華新', '1608': '華榮', '1609': '大亞', '1611': '中電', '1612': '宏泰',
-            '1614': '三洋電', '1615': '大山', '1616': '億泰', '1617': '榮星', '1618': '合機',
-            # 化學工業
-            '1701': '中化', '1702': '南僑', '1707': '葡萄王', '1708': '東鹼', '1709': '和益', '1710': '東聯', '1711': '永光',
-            '1712': '興農', '1713': '國化', '1714': '和桐', '1715': '萬洲', '1717': '長興', '1718': '中纖', '1720': '生達',
-            '1721': '三晃', '1722': '台肥', '1723': '中碳', '1724': '台硝', '1725': '元禎', '1726': '永記', '1727': '中華化',
-            '1730': '花仙子', '1731': '美吾華', '1732': '毛寶', '1733': '五鼎', '1734': '杏輝', '1735': '日勝化', '1736': '喬山',
-            '1737': '臺鹽', '1762': '中化生', '1773': '勝一', '1776': '展宇', '1783': '和康生', '1786': '科妍', '1795': '美時',
-            # 玻璃陶瓷
-            '1802': '台玻', '1805': '寶徠', '1806': '冠軍', '1808': '潤隆', '1809': '中釉', '1810': '和成', '1817': '凱撒衛',
-            # 造紙工業
-            '1903': '士紙', '1904': '正隆', '1905': '華紙', '1906': '寶隆', '1907': '永豐餘', '1909': '榮成',
-            # 鋼鐵工業
-            '2002': '中鋼', '2006': '東和鋼鐵', '2007': '燁興', '2008': '高興昌', '2009': '第一銅', '2010': '春源',
-            '2012': '春雨', '2013': '中鋼構', '2014': '中鴻', '2015': '豐興', '2017': '官田鋼', '2020': '美亞',
-            '2022': '聚亨', '2023': '燁輝', '2024': '志聯', '2025': '千興', '2027': '大成鋼', '2028': '威致',
-            '2029': '盛餘', '2030': '彰源', '2031': '新光鋼', '2032': '新鋼', '2033': '佳大', '2034': '允強',
-            '2038': '海光', '2049': '上銀', '2059': '川湖', '2062': '橋椿', '2069': '運錩',
-            # 橡膠工業
-            '2101': '南港', '2102': '泰豐', '2103': '台橡', '2104': '國際中橡', '2105': '正新', '2106': '建大',
-            '2107': '厚生', '2108': '南帝', '2109': '華豐', '2114': '鑫永銓', '2115': '六暉-KY',
-            # 汽車工業
-            '2201': '裕隆', '2204': '中華', '2206': '三陽工業', '2207': '和泰車', '2208': '台船', '2211': '長榮鋼',
-            '2227': '裕日車', '2228': '劍麟', '2231': '為升', '2233': '宇隆', '2236': '百達-KY', '2239': '英利-KY',
-            '2241': '艾姆勒', '2243': '宏旭-KY', '2247': '汎德永業',
-            # 半導體/電子
-            '2301': '光寶科', '2302': '麗正', '2303': '聯電', '2305': '全友', '2308': '台達電', '2312': '金寶',
-            '2313': '華通', '2314': '台揚', '2315': '神達', '2316': '楠梓電', '2317': '鴻海', '2321': '東訊',
-            '2323': '中環', '2324': '仁寶', '2327': '國巨', '2328': '廣宇', '2329': '華泰', '2330': '台積電',
-            '2331': '精英', '2332': '友訊', '2337': '旺宏', '2338': '光罩', '2340': '台亞', '2342': '茂矽',
-            '2344': '華邦電', '2345': '智邦', '2347': '聯強', '2348': '海悅', '2349': '錸德', '2351': '順德',
-            '2352': '佳世達', '2353': '宏碁', '2354': '鴻準', '2355': '敬鵬', '2356': '英業達', '2357': '華碩',
-            '2358': '廷鑫', '2359': '所羅門', '2360': '致茂', '2362': '藍天', '2363': '矽統', '2364': '倫飛',
-            '2365': '昆盈', '2367': '燿華', '2368': '金像電', '2369': '菱生', '2371': '大同', '2373': '震旦行',
-            '2374': '佳能', '2375': '凱美', '2376': '技嘉', '2377': '微星', '2379': '瑞昱', '2380': '虹光',
-            '2382': '廣達', '2383': '台光電', '2385': '群光', '2387': '精元', '2388': '威盛', '2392': '正崴',
-            '2393': '億光', '2395': '研華', '2397': '友通', '2399': '映泰',
-            # 電子工業
-            '2401': '凌陽', '2402': '毅嘉', '2404': '漢唐', '2405': '輔信', '2406': '國碩', '2408': '南亞科',
-            '2409': '友達', '2412': '中華電', '2413': '環科', '2414': '精技', '2415': '錩新', '2417': '圓剛',
-            '2419': '仲琦', '2420': '新巨', '2421': '建準', '2423': '固緯', '2424': '隴華', '2425': '承啟',
-            '2426': '鼎元', '2427': '三商電', '2428': '興勤', '2429': '銘旺科', '2430': '燦坤', '2431': '聯昌',
-            '2432': '倚天酷碁', '2433': '互盛電', '2434': '統懋', '2436': '偉詮電', '2438': '翔耀', '2439': '美律',
-            '2440': '太空梭', '2441': '超豐', '2442': '新美齊', '2443': '昶虹', '2444': '兆勁', '2449': '京元電子',
-            '2450': '神腦', '2451': '創見', '2453': '凌群', '2454': '聯發科', '2455': '全新', '2457': '飛宏',
-            '2458': '義隆', '2459': '敦吉', '2460': '建通', '2461': '光群雷', '2462': '良得電', '2464': '盟立',
-            '2465': '麗臺', '2466': '冠西電', '2467': '志聖', '2468': '華經', '2471': '資通', '2472': '立隆電',
-            '2474': '可成', '2476': '鉅祥', '2477': '美隆電', '2478': '大毅', '2480': '敦陽科', '2481': '強茂',
-            '2482': '連宇', '2483': '百容', '2484': '希華', '2485': '兆赫', '2486': '一詮', '2488': '漢平',
-            '2489': '瑞軒', '2491': '吉祥全', '2492': '華新科', '2493': '揚博', '2495': '普安', '2496': '卓越',
-            '2497': '怡利電', '2498': '宏達電',
-            # 營建
-            '2501': '國建', '2504': '國產', '2505': '國揚', '2506': '太設', '2509': '全坤建', '2511': '太子',
-            '2514': '龍邦', '2515': '中工', '2516': '新建', '2520': '冠德', '2524': '京城', '2527': '宏璟',
-            '2528': '皇普', '2530': '華建', '2534': '宏盛', '2535': '達欣工', '2536': '宏普', '2537': '聯上發',
-            '2538': '基泰', '2539': '櫻花建', '2540': '愛山林', '2542': '興富發', '2543': '皇昌', '2545': '皇翔',
-            '2546': '根基', '2547': '日勝生', '2548': '華固', '2597': '潤弘',
-            # 航運
-            '2601': '益航', '2603': '長榮', '2605': '新興', '2606': '裕民', '2607': '榮運', '2608': '嘉里大榮',
-            '2609': '陽明', '2610': '華航', '2611': '志信', '2612': '中航', '2613': '中櫃', '2614': '東森',
-            '2615': '萬海', '2616': '山隆', '2617': '台航', '2618': '長榮航', '2630': '亞航', '2633': '台灣高鐵',
-            '2634': '漢翔', '2636': '台驊投控', '2637': '慧洋-KY', '2642': '宅配通', '2645': '長榮航太',
-            # 觀光
-            '2701': '萬企', '2702': '華園', '2704': '國賓', '2705': '六福', '2706': '第一店', '2707': '晶華',
-            '2712': '遠雄來', '2722': '夏都', '2723': '美食-KY', '2727': '王品', '2731': '雄獅', '2739': '寒舍',
-            '2748': '雲品',
-            # 金融保險
-            '2801': '彰銀', '2809': '京城銀', '2812': '台中銀', '2816': '旺旺保', '2820': '華票', '2832': '台產',
-            '2834': '臺企銀', '2836': '高雄銀', '2838': '聯邦銀', '2845': '遠東銀', '2849': '安泰銀', '2850': '新產',
-            '2851': '中再保', '2852': '第一保', '2855': '統一證', '2867': '三商壽', '2880': '華南金', '2881': '富邦金',
-            '2882': '國泰金', '2883': '開發金', '2884': '玉山金', '2885': '元大金', '2886': '兆豐金', '2887': '台新金',
-            '2888': '新光金', '2889': '國票金', '2890': '永豐金', '2891': '中信金', '2892': '第一金',
-            # 百貨
-            '2901': '欣欣', '2903': '遠百', '2904': '匯僑', '2905': '三商', '2906': '高林', '2908': '特力',
-            '2910': '統領', '2911': '麗嬰房', '2912': '統一超', '2913': '農林', '2915': '潤泰全', '2923': '鼎固-KY',
-            '2929': '淘帝-KY', '2939': '凱羿-KY', '2945': '三商家購',
-            # 電子
-            '3002': '歐格', '3003': '健和興', '3004': '豐達科', '3005': '神基', '3006': '晶豪科', '3008': '大立光',
-            '3010': '華立', '3011': '今皓', '3013': '晟銘電', '3014': '聯陽', '3015': '全漢', '3016': '嘉晶',
-            '3017': '奇鋐', '3018': '隆銘綠能', '3019': '亞光', '3021': '鴻名', '3022': '威強電', '3023': '信邦',
-            '3024': '憶聲', '3025': '星通', '3026': '禾伸堂', '3027': '盛達', '3028': '增你強', '3029': '零壹',
-            '3030': '德律', '3031': '佰鴻', '3032': '偉訓', '3033': '威健', '3034': '聯詠', '3035': '智原',
-            '3036': '文曄', '3037': '欣興', '3038': '全台', '3040': '遠見', '3041': '揚智', '3042': '晶技',
-            '3043': '科風', '3044': '健鼎', '3045': '台灣大', '3046': '建碁', '3047': '訊舟', '3048': '益登',
-            '3049': '精金', '3050': '鈺德', '3051': '力特', '3052': '夆典', '3054': '立萬利', '3055': '蔚華科',
-            '3056': '富華新', '3057': '喬鼎', '3058': '立德', '3059': '華晶科', '3060': '銘異', '3062': '建漢',
-            '3090': '日電貿', '3092': '鴻碩', '3094': '聯傑', '3130': '一零四', '3138': '耀登', '3149': '正達',
-            '3164': '景岳', '3167': '大量', '3189': '景碩', '3209': '全科', '3229': '晟鈦', '3231': '緯創',
-            '3257': '虹冠電', '3266': '昇陽', '3296': '勝德', '3305': '昇貿', '3308': '聯德', '3311': '閎暉',
-            '3312': '弘憶股', '3321': '同泰', '3338': '泰碩', '3346': '麗清', '3356': '奇偶', '3376': '新日興',
-            '3380': '明泰', '3406': '玉晶光', '3413': '京鼎', '3416': '融程電', '3419': '譁裕', '3432': '台端',
-            '3437': '榮創', '3443': '創意', '3447': '展達', '3450': '聯鈞', '3454': '晶睿', '3494': '誠研',
-            '3501': '維熹', '3504': '揚明光', '3515': '華擎', '3518': '柏騰', '3528': '安馳', '3530': '晶相光',
-            '3532': '台勝科', '3533': '嘉澤', '3535': '晶彩科', '3545': '敦泰', '3550': '聯穎', '3557': '嘉威',
-            '3563': '牧德', '3576': '聯合再生', '3583': '辛耘', '3588': '通嘉', '3591': '艾笛森', '3592': '瑞鼎',
-            '3593': '力銘', '3596': '智易', '3605': '宏致', '3607': '谷崧', '3617': '碩天', '3622': '洋華',
-            '3645': '達邁', '3652': '精聯', '3653': '健策', '3661': '世芯-KY', '3665': '貿聯-KY', '3669': '圓展',
-            '3673': 'TPK-KY', '3679': '新至陞', '3682': '亞太電', '3686': '達能', '3694': '海華', '3701': '大眾控',
-            '3702': '大聯大', '3703': '欣陸', '3704': '合勤控', '3705': '永信', '3706': '神達', '3708': '上緯投控',
-            '3711': '日月光投控', '3712': '永崴投控', '3714': '富采', '3715': '定穎投控', '3716': '中化控股',
-        }
-        
+    # =========================
+    # 取得完整股票清單
+    # =========================
+    def get_all_stocks(self):
+
         stocks = {}
-        for code, name in all_stocks.items():
-            stocks[code] = {'name': name, 'industry': '一般'}
-        
-        return stocks
 
-    def get_stock_data(self, stock_id, period='60d'):
-        """從 Yahoo Finance 獲取股票資料"""
         try:
-            ticker = f"{stock_id}.TW"
+
+            # =====================
+            # 上市
+            # =====================
+            url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+
+            tables = pd.read_html(url_twse)
+
+            df_twse = tables[0]
+            df_twse.columns = df_twse.iloc[0]
+            df_twse = df_twse[1:]
+
+            for _, row in df_twse.iterrows():
+
+                try:
+                    code_name = str(row["有價證券代號及名稱"])
+
+                    parts = code_name.split()
+
+                    if len(parts) < 2:
+                        continue
+
+                    stock_id = parts[0]
+                    stock_name = " ".join(parts[1:])
+
+                    if stock_id.isdigit() and len(stock_id) == 4:
+
+                        stocks[stock_id] = {
+                            "name": stock_name,
+                            "market": "上市"
+                        }
+
+                except:
+                    continue
+
+            # =====================
+            # 上櫃
+            # =====================
+            url_otc = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
+
+            tables = pd.read_html(url_otc)
+
+            df_otc = tables[0]
+            df_otc.columns = df_otc.iloc[0]
+            df_otc = df_otc[1:]
+
+            for _, row in df_otc.iterrows():
+
+                try:
+                    code_name = str(row["有價證券代號及名稱"]
+
+                    )
+
+                    parts = code_name.split()
+
+                    if len(parts) < 2:
+                        continue
+
+                    stock_id = parts[0]
+                    stock_name = " ".join(parts[1:])
+
+                    if stock_id.isdigit() and len(stock_id) == 4:
+
+                        stocks[stock_id] = {
+                            "name": stock_name,
+                            "market": "上櫃"
+                        }
+
+                except:
+                    continue
+
+            # =====================
+            # ETF
+            # =====================
+            url_etf = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=7"
+
+            tables = pd.read_html(url_etf)
+
+            df_etf = tables[0]
+            df_etf.columns = df_etf.iloc[0]
+            df_etf = df_etf[1:]
+
+            for _, row in df_etf.iterrows():
+
+                try:
+                    code_name = str(row["有價證券代號及名稱"])
+
+                    parts = code_name.split()
+
+                    if len(parts) < 2:
+                        continue
+
+                    stock_id = parts[0]
+                    stock_name = " ".join(parts[1:])
+
+                    if stock_id.isdigit() and len(stock_id) == 4:
+
+                        stocks[stock_id] = {
+                            "name": stock_name,
+                            "market": "ETF"
+                        }
+
+                except:
+                    continue
+
+            return stocks
+
+        except Exception as e:
+
+            st.error(f"❌ 股票清單取得失敗：{e}")
+
+            return {}
+
+    # =========================
+    # 取得單一股票資料
+    # =========================
+    def get_stock_data(self, stock_id, market):
+
+        try:
+
+            suffix = ".TWO" if market == "上櫃" else ".TW"
+
+            ticker = f"{stock_id}{suffix}"
+
             stock = yf.Ticker(ticker)
-            hist = stock.history(period=period)
-            
-            if hist.empty or len(hist) < 5:
+
+            hist = stock.history(period="90d")
+
+            if hist.empty or len(hist) < 25:
                 return None
-            
-            volume = hist['Volume']
-            close = hist['Close']
-            turnover = volume * close
-            
-            df = pd.DataFrame({
-                'date': hist.index,
-                'stock_id': stock_id,
-                'open': hist['Open'],
-                'high': hist['High'],
-                'low': hist['Low'],
-                'close': hist['Close'],
-                'volume': hist['Volume'],
-                'turnover': turnover
-            })
-            return df
-        except Exception:
+
+            hist = hist.dropna()
+
+            if len(hist) < 25:
+                return None
+
+            close = hist["Close"]
+            volume = hist["Volume"]
+
+            turnover = close * volume
+
+            avg_turnover_20d = turnover.tail(20).mean()
+
+            # 不符合成交額門檻
+            if avg_turnover_20d < self.min_turnover:
+                return None
+
+            # 漲幅計算
+            r5 = (close.iloc[-1] / close.iloc[-5] - 1) * 100
+            r20 = (close.iloc[-1] / close.iloc[-20] - 1) * 100
+            r60 = (close.iloc[-1] / close.iloc[-60] - 1) * 100 if len(close) >= 60 else 0
+
+            # 均線
+            ma5 = close.tail(5).mean()
+            ma20 = close.tail(20).mean()
+
+            # RSI
+            delta = close.diff()
+
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+
+            avg_gain = gain.rolling(14).mean()
+            avg_loss = loss.rolling(14).mean()
+
+            rs = avg_gain / avg_loss
+
+            rsi = 100 - (100 / (1 + rs))
+
+            latest_rsi = rsi.iloc[-1]
+
+            # 動能分數
+            momentum_score = (
+                r5 * 0.5 +
+                r20 * 0.3 +
+                (latest_rsi / 100) * 20
+            )
+
+            return {
+                "stock_id": stock_id,
+                "stock_name": self.stock_list[stock_id]["name"],
+                "market": market,
+                "close": round(close.iloc[-1], 2),
+                "return_5d": round(r5, 2),
+                "return_20d": round(r20, 2),
+                "return_60d": round(r60, 2),
+                "avg_turnover_20d": avg_turnover_20d,
+                "ma5": round(ma5, 2),
+                "ma20": round(ma20, 2),
+                "rsi": round(latest_rsi, 2),
+                "momentum_score": round(momentum_score, 2),
+                "stop_loss": round(close.iloc[-1] * 0.92, 2)
+            }
+
+        except:
             return None
 
-    def analyze_all_stocks(self):
-        """分析所有股票"""
-        self.all_stocks = self.get_all_twse_stocks()
-        
-        if not self.all_stocks:
-            st.error("無法取得股票清單")
+    # =========================
+    # 全市場掃描
+    # =========================
+    def scan_market(self):
+
+        self.stock_list = self.get_all_stocks()
+
+        if not self.stock_list:
             return pd.DataFrame()
-        
+
         results = []
+
+        stock_ids = list(self.stock_list.keys())
+
+        total = len(stock_ids)
+
         progress_bar = st.progress(0)
-        status_text = st.empty()
-        result_container = st.empty()
-        
-        stock_ids = list(self.all_stocks.keys())
-        total_stocks = len(stock_ids)
-        
-        st.info(f"📊 共 {total_stocks} 檔股票需要分析，預計需要約 {total_stocks * 0.8 / 60:.1f} 分鐘")
-        
-        for idx, stock_id in enumerate(stock_ids):
-            stock_name = self.all_stocks[stock_id]['name']
-            progress_percent = ((idx + 1) / total_stocks) * 100
-            status_text.text(f"📈 分析進度: {idx+1}/{total_stocks} ({progress_percent:.1f}%) - {stock_id} {stock_name}")
-            
-            df = self.get_stock_data(stock_id, period='60d')
-            
-            if df is not None and len(df) >= 20:
-                avg_turnover = df['turnover'].tail(20).mean()
-                
-                if avg_turnover >= self.min_turnover:
-                    closes = df['close'].values
-                    r5 = ((closes[-1] / closes[-min(5, len(closes))] - 1) * 100) if len(closes) >= 5 else 0
-                    r20 = ((closes[-1] / closes[-min(20, len(closes))] - 1) * 100) if len(closes) >= 20 else 0
-                    r60 = ((closes[-1] / closes[0] - 1) * 100) if len(closes) >= 60 else 0
-                    
-                    result = {
-                        'stock_id': stock_id,
-                        'stock_name': stock_name,
-                        'close': closes[-1],
-                        'return_5d': r5,
-                        'return_20d': r20,
-                        'return_60d': r60,
-                        'avg_turnover_20d': avg_turnover,
-                        'momentum_score': r5 * 0.6 + r20 * 0.3
-                    }
+
+        status = st.empty()
+
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+
+            futures = {
+                executor.submit(
+                    self.get_stock_data,
+                    stock_id,
+                    self.stock_list[stock_id]["market"]
+                ): stock_id
+                for stock_id in stock_ids
+            }
+
+            for future in as_completed(futures):
+
+                completed += 1
+
+                progress = completed / total
+
+                progress_bar.progress(progress)
+
+                status.text(
+                    f"📈 掃描進度：{completed}/{total} ({progress*100:.1f}%)"
+                )
+
+                result = future.result()
+
+                if result:
                     results.append(result)
-                    
-                    if len(results) % 5 == 0:
-                        result_container.info(f"📌 已找到 {len(results)} 檔符合條件的股票 (門檻: {self.min_turnover/1e8:.0f}億)")
-            
-            progress_bar.progress((idx + 1) / total_stocks)
-            time.sleep(0.25)
-        
-        status_text.empty()
+
         progress_bar.empty()
-        result_container.empty()
-        
+        status.empty()
+
         if not results:
             return pd.DataFrame()
-        
-        result_df = pd.DataFrame(results)
-        result_df = result_df.sort_values('momentum_score', ascending=False)
-        result_df['stop_loss'] = (result_df['close'] * 0.92).round(2)
-        
-        return result_df
+
+        df = pd.DataFrame(results)
+
+        df = df.sort_values(
+            by="momentum_score",
+            ascending=False
+        )
+
+        return df
 
 
-# ====================== 主程式 ======================
-st.sidebar.header("📊 篩選設定")
+# =========================
+# Sidebar
+# =========================
+st.sidebar.header("⚙️ 掃描設定")
 
-min_turnover_billion = st.sidebar.number_input(
-    "最低日均成交金額（億台幣）",
+min_turnover = st.sidebar.number_input(
+    "最低20日均成交額（億）",
     min_value=10,
     max_value=500,
     value=100,
-    step=10,
-    help="20日均成交金額需大於此值"
+    step=10
 )
 
 top_n = st.sidebar.number_input(
     "顯示前幾名",
     min_value=10,
-    max_value=100,
-    value=30,
+    max_value=200,
+    value=50,
     step=10
 )
 
-st.sidebar.markdown("---")
-st.sidebar.info("""
-**🎯 篩選邏輯**：
-- 20日均成交 ≥ 設定門檻
-- 動能分數 = 5日漲幅×0.6 + 20日漲幅×0.3
-- 停損價 = 股價 × 0.92 (-8%)
+worker_count = st.sidebar.slider(
+    "多線程數量",
+    min_value=5,
+    max_value=50,
+    value=20
+)
 
-**📌 注意事項**：
-- 僅供參考，非投資建議
-- 高動能伴隨高風險
-- 請自行判斷投資決策
+st.sidebar.markdown("---")
+
+st.sidebar.info("""
+### 📌 動能分數計算
+
+動能分數 =
+- 5日漲幅 × 0.5
+- 20日漲幅 × 0.3
+- RSI強度 × 0.2
+
+### ⚠️ 注意
+僅供研究參考  
+非投資建議
 """)
 
-if st.button("🔍 開始掃描全市場高動能股票", type="primary", use_container_width=True):
-    scanner = TWSE_Scanner()
-    scanner.min_turnover = min_turnover_billion * 100_000_000
-    
-    with st.spinner("⏳ 正在分析全市場股票，請耐心等待（約10-15分鐘）..."):
-        df = scanner.analyze_all_stocks()
-        
-        if not df.empty:
-            st.balloons()
-            st.success(f"✅ 分析完成！共找到 {len(df)} 檔符合高流動性條件的股票")
-            
-            # 顯示統計摘要
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📊 符合條件", f"{len(df)} 檔")
-            with col2:
-                st.metric("📈 平均5日漲幅", f"{df['return_5d'].mean():.1f}%")
-            with col3:
-                st.metric("🚀 平均20日漲幅", f"{df['return_20d'].mean():.1f}%")
-            with col4:
-                st.metric("💪 最高動能分數", f"{df['momentum_score'].max():.1f}")
-            
-            # 顯示結果表格
-            display_df = df.head(top_n).copy()
-            display_df['return_5d'] = display_df['return_5d'].round(1)
-            display_df['return_20d'] = display_df['return_20d'].round(1)
-            display_df['return_60d'] = display_df['return_60d'].round(1)
-            display_df['20日均成交'] = (display_df['avg_turnover_20d'] / 1e8).round(1).astype(str) + "億"
-            display_df['收盤價'] = display_df['close'].round(2)
-            
-            display_cols = ['stock_id', 'stock_name', '收盤價', 'return_5d', 'return_20d', 
-                           'return_60d', '20日均成交', 'momentum_score', 'stop_loss']
-            display_df = display_df[display_cols]
-            display_df.columns = ['代碼', '名稱', '收盤價', '5日漲幅%', '20日漲幅%', 
-                                '60日漲幅%', '20日均成交', '動能分數', '建議停損價']
-            
-            st.dataframe(display_df, use_container_width=True, height=500)
-            
-            # 下載功能
-            csv = display_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下載完整報告 (CSV)",
-                data=csv,
-                file_name=f"momentum_stocks_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv",
-            )
-            
-            # 顯示前10名詳細
-            st.subheader("🏆 動能最強前10名")
-            for idx, row in display_df.head(10).iterrows():
-                with st.container():
-                    col1, col2, col3, col4, col5, col6 = st.columns([0.5, 1, 1.5, 1, 1.5, 1.5])
-                    with col1:
-                        st.metric("排名", idx+1)
-                    with col2:
-                        st.metric("代碼", row['代碼'])
-                    with col3:
-                        st.metric("名稱", row['名稱'])
-                    with col4:
-                        st.metric("股價", f"{row['收盤價']:.1f}")
-                    with col5:
-                        delta = f"{row['5日漲幅%']:.1f}%" if row['5日漲幅%'] >= 0 else None
-                        st.metric("5日漲幅", f"{row['5日漲幅%']:.1f}%", delta=delta)
-                    with col6:
-                        st.metric("動能分數", f"{row['動能分數']:.1f}")
-                    st.divider()
-        else:
-            st.warning(f"⚠️ 無股票達到 {min_turnover_billion} 億的日均成交門檻，請降低門檻試試")
+# =========================
+# 開始掃描
+# =========================
+if st.button(
+    "🚀 開始掃描全市場",
+    type="primary",
+    use_container_width=True
+):
 
-st.caption(f"📅 最後更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 📊 資料來源：Yahoo Finance | ⚠️ 僅供參考，非投資建議")
+    scanner = TWStockScanner()
+
+    scanner.min_turnover = min_turnover * 100_000_000
+
+    scanner.max_workers = worker_count
+
+    with st.spinner("⏳ 正在高速掃描市場..."):
+
+        start_time = time.time()
+
+        df = scanner.scan_market()
+
+        elapsed = time.time() - start_time
+
+    # =========================
+    # 顯示結果
+    # =========================
+    if not df.empty:
+
+        st.balloons()
+
+        st.success(
+            f"✅ 掃描完成！找到 {len(df)} 檔符合條件股票 "
+            f"（耗時 {elapsed:.1f} 秒）"
+        )
+
+        # =====================
+        # 統計
+        # =====================
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("符合條件", f"{len(df)} 檔")
+
+        with col2:
+            st.metric(
+                "平均5日漲幅",
+                f"{df['return_5d'].mean():.2f}%"
+            )
+
+        with col3:
+            st.metric(
+                "平均20日漲幅",
+                f"{df['return_20d'].mean():.2f}%"
+            )
+
+        with col4:
+            st.metric(
+                "最高動能分數",
+                f"{df['momentum_score'].max():.2f}"
+            )
+
+        # =====================
+        # 顯示表格
+        # =====================
+        display_df = df.head(top_n).copy()
+
+        display_df["20日均成交額(億)"] = (
+            display_df["avg_turnover_20d"] / 100_000_000
+        ).round(2)
+
+        final_df = display_df[
+            [
+                "stock_id",
+                "stock_name",
+                "market",
+                "close",
+                "return_5d",
+                "return_20d",
+                "return_60d",
+                "rsi",
+                "20日均成交額(億)",
+                "momentum_score",
+                "stop_loss"
+            ]
+        ]
+
+        final_df.columns = [
+            "代碼",
+            "名稱",
+            "市場",
+            "收盤價",
+            "5日漲幅%",
+            "20日漲幅%",
+            "60日漲幅%",
+            "RSI",
+            "20日均成交(億)",
+            "動能分數",
+            "停損價"
+        ]
+
+        st.dataframe(
+            final_df,
+            use_container_width=True,
+            height=700
+        )
+
+        # =====================
+        # 下載 CSV
+        # =====================
+        csv = final_df.to_csv(
+            index=False
+        ).encode("utf-8-sig")
+
+        st.download_button(
+            label="📥 下載 CSV",
+            data=csv,
+            file_name=f"tw_momentum_scan_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv"
+        )
+
+        # =====================
+        # TOP 10
+        # =====================
+        st.subheader("🏆 TOP 10 強勢股")
+
+        top10 = final_df.head(10)
+
+        for idx, row in top10.iterrows():
+
+            with st.container():
+
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+                with c1:
+                    st.metric("排名", idx + 1)
+
+                with c2:
+                    st.metric("代碼", row["代碼"])
+
+                with c3:
+                    st.metric("名稱", row["名稱"])
+
+                with c4:
+                    st.metric("股價", row["收盤價"])
+
+                with c5:
+                    st.metric("5日漲幅", f"{row['5日漲幅%']}%")
+
+                with c6:
+                    st.metric("動能", row["動能分數"])
+
+                st.divider()
+
+    else:
+
+        st.warning("⚠️ 沒有找到符合條件股票")
+
+# =========================
+# Footer
+# =========================
+st.caption(
+    f"""
+📅 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+｜資料來源：Yahoo Finance
+｜僅供研究參考，非投資建議
+"""
+)
