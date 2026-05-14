@@ -25,37 +25,57 @@ st.markdown("""
 # =========================
 def get_stock_list():
 
+    import urllib3
+    urllib3.disable_warnings()
+
     url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     url_otc = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
 
     stocks = {}
 
     def parse(url):
 
-        r = requests.get(url, headers=headers)
-        r.encoding = "utf-8"
+        try:
 
-        df = pd.read_html(StringIO(r.text))[0]
-        df.columns = df.iloc[0]
-        df = df[1:]
+            r = requests.get(
+                url,
+                headers=headers,
+                verify=False,   # ✅ 關鍵修復
+                timeout=15
+            )
 
-        for _, row in df.iterrows():
+            r.encoding = "utf-8"
 
-            try:
-                text = str(row["有價證券代號及名稱"])
-                if len(text.split()) < 2:
+            df = pd.read_html(StringIO(r.text))[0]
+
+            df.columns = df.iloc[0]
+            df = df[1:]
+
+            for _, row in df.iterrows():
+
+                try:
+
+                    text = str(row["有價證券代號及名稱"])
+
+                    if len(text.split()) < 2:
+                        continue
+
+                    code = text.split()[0]
+                    name = " ".join(text.split()[1:])
+
+                    if code.isdigit() and len(code) == 4:
+                        stocks[code] = name
+
+                except:
                     continue
 
-                code = text.split()[0]
-                name = " ".join(text.split()[1:])
+        except Exception as e:
 
-                if code.isdigit() and len(code) == 4:
-                    stocks[code] = name
-
-            except:
-                continue
+            st.warning(f"⚠️ 清單載入失敗（fallback啟用）：{e}")
 
     parse(url_twse)
     parse(url_otc)
