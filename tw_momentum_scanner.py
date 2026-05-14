@@ -25,11 +25,9 @@ st.markdown("""
 # =========================
 def get_stock_list():
 
+    import requests
     import urllib3
     urllib3.disable_warnings()
-
-    url_twse = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    url_otc = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
 
     headers = {
         "User-Agent": "Mozilla/5.0"
@@ -37,48 +35,51 @@ def get_stock_list():
 
     stocks = {}
 
-    def parse(url):
+    # =========================
+    # TWSE API（上市）
+    # =========================
+    try:
 
-        try:
+        url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 
-            r = requests.get(
-                url,
-                headers=headers,
-                verify=False,   # ✅ 關鍵修復
-                timeout=15
-            )
+        r = requests.get(url_twse, headers=headers, timeout=10)
 
-            r.encoding = "utf-8"
+        data = r.json()
 
-            df = pd.read_html(StringIO(r.text))[0]
+        for item in data:
 
-            df.columns = df.iloc[0]
-            df = df[1:]
+            code = item.get("Code")
 
-            for _, row in df.iterrows():
+            name = item.get("Name")
 
-                try:
+            if code and code.isdigit():
+                stocks[code] = name
 
-                    text = str(row["有價證券代號及名稱"])
+    except Exception as e:
+        st.warning(f"TWSE 失敗：{e}")
 
-                    if len(text.split()) < 2:
-                        continue
+    # =========================
+    # OTC API（上櫃）
+    # =========================
+    try:
 
-                    code = text.split()[0]
-                    name = " ".join(text.split()[1:])
+        url_otc = "https://www.tpex.org.tw/openapi/v1/market/regular_stock/all"
 
-                    if code.isdigit() and len(code) == 4:
-                        stocks[code] = name
+        r = requests.get(url_otc, headers=headers, timeout=10)
 
-                except:
-                    continue
+        data = r.json()
 
-        except Exception as e:
+        for item in data:
 
-            st.warning(f"⚠️ 清單載入失敗（fallback啟用）：{e}")
+            code = item.get("code")
 
-    parse(url_twse)
-    parse(url_otc)
+            name = item.get("name")
+
+            if code and code.isdigit():
+                stocks[code] = name
+
+    except Exception as e:
+        st.warning(f"OTC 失敗：{e}")
 
     return stocks
 
